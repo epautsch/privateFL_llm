@@ -12,7 +12,7 @@ import argparse
 
 
 class IMDbDataset(Dataset):
-    def __init__(self, dataset, tokenizer, max_length=384):
+    def __init__(self, dataset, tokenizer, max_length=256):
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -90,7 +90,7 @@ def load_classifier_head(model, load_path):
     #    return s.getsockname()[1]
 
 
-class CustomLRSchedueler:
+class CustomLRScheduler:
     def __init__(self, optimizer, factor=1.5, patience=2):
         self.optimizer = optimizer
         self.factor = factor
@@ -98,7 +98,7 @@ class CustomLRSchedueler:
         self.best_accuracy = 0.0
         self.epochs_since_improvement = 0
         self.lr_history = []
-        self.lr_history.append(optimizer.param_groups[0.0]['lr'])
+        self.lr_history.append(optimizer.param_groups[0]['lr'])
 
     def step(self, accuracy):
         if accuracy > self.best_accuracy:
@@ -106,15 +106,18 @@ class CustomLRSchedueler:
             self.epochs_since_improvement = 0
         else:
             self.epochs_since_improvement += 1
-            if self.epochs_since_improvement >= self.patience
+            if self.epochs_since_improvement >= self.patience:
                 self.adjust_learning_rate()
                 self.epochs_since_improvement = 0
 
     def adjust_learning_rate(self):
+        old_lr = self.optimizer.param_groups[0]['lr']
         for param_group in self.optimizer.param_groups:
             param_group['lr'] /= self.factor
-            self.lr_history.append(param_group['lr'])
-            print(f'*** Learning rate changed from {self.lr_history[len(self.lr_hitory)] - 2} to {self.lr_history[len(self.lr_history)] - 2} ***')
+        new_lr = self.optimizer.param_groups[0]['lr']
+        self.lr_history.append(new_lr)
+        previous_lr = self.lr_history[-2] if len(self.lr_history) > 1 else old_lr
+        print(f'*** Learning rate changed from {previous_lr} to {new_lr} ***')
 
     def get_lr_history(self):
         return self.lr_history
@@ -151,7 +154,7 @@ def main(rank, world_size, batch_size, num_epochs, load_path=None):
     if load_path:
         load_classifier_head(model, load_path)
 
-    optimizer = AdamW(model.module.classifier.parameters(), lr=5e-4)
+    optimizer = AdamW(model.module.classifier.parameters(), lr=1e-3)
     lr_scheduler = CustomLRScheduler(optimizer)
 
     best_accuracy = 0.0
