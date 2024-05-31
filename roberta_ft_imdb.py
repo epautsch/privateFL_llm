@@ -89,6 +89,37 @@ def load_classifier_head(model, load_path):
    #     s.bind(('', 0))
     #    return s.getsockname()[1]
 
+
+class CustomLRSchedueler:
+    def __init__(self, optimizer, factor=1.5, patience=2):
+        self.optimizer = optimizer
+        self.factor = factor
+        self.patience = patience
+        self.best_accuracy = 0.0
+        self.epochs_since_improvement = 0
+        self.lr_history = []
+        self.lr_history.append(optimizer.param_groups[0.0]['lr'])
+
+    def step(self, accuracy):
+        if accuracy > self.best_accuracy:
+            self.best_accuracy = accuracy
+            self.epochs_since_improvement = 0
+        else:
+            self.epochs_since_improvement += 1
+            if self.epochs_since_improvement >= self.patience
+                self.adjust_learning_rate()
+                self.epochs_since_improvement = 0
+
+    def adjust_learning_rate(self):
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] /= self.factor
+            self.lr_history.append(param_group['lr'])
+            print(f'*** Learning rate changed from {self.lr_history[len(self.lr_hitory)] - 2} to {self.lr_history[len(self.lr_history)] - 2} ***')
+
+    def get_lr_history(self):
+        return self.lr_history
+
+
 def main(rank, world_size, batch_size, num_epochs, load_path=None):
     setup(rank, world_size)
 
@@ -121,6 +152,7 @@ def main(rank, world_size, batch_size, num_epochs, load_path=None):
         load_classifier_head(model, load_path)
 
     optimizer = AdamW(model.module.classifier.parameters(), lr=5e-4)
+    lr_scheduler = CustomLRScheduler(optimizer)
 
     best_accuracy = 0.0
 
@@ -172,6 +204,8 @@ def main(rank, world_size, batch_size, num_epochs, load_path=None):
                 best_accuracy = accuracy
                 save_classifier_head(model, 'imdb_classifier_head.pt')
                 print(f'NEW BEST ACCURACY. MODEL SAVED.')
+
+        lr_scheduler.step(accuracy)
 
     cleanup()
 
