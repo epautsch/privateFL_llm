@@ -47,7 +47,7 @@ class SentimentClassifier(nn.Module):
     def __init__(self, roberta_model):
         super(SentimentClassifier, self).__init__()
         self.roberta = roberta_model
-        self.dropout = nn.Dropout(p=0.08)
+        self.dropout = nn.Dropout(p=0.0)
         self.classifier = nn.Sequential(
                 # too large (try 512)
             nn.Linear(roberta_model.config.hidden_size, 512),
@@ -95,14 +95,13 @@ class CustomLRScheduler:
         self.optimizer = optimizer
         self.factor = factor
         self.patience = patience
-        self.best_accuracy = 0.0
+        self.best_loss = float('inf')
         self.epochs_since_improvement = 0
-        self.lr_history = []
-        self.lr_history.append(optimizer.param_groups[0]['lr'])
+        self.lr_history = [optimizer.param_groups[0]['lr']]
 
-    def step(self, accuracy):
-        if accuracy > self.best_accuracy:
-            self.best_accuracy = accuracy
+    def step(self, current_loss):
+        if current_loss < self.best_loss:
+            self.best_loss = current_loss
             self.epochs_since_improvement = 0
         else:
             self.epochs_since_improvement += 1
@@ -122,8 +121,32 @@ class CustomLRScheduler:
     def get_lr_history(self):
         return self.lr_history
 
+def save_training_state(epoch, model, optimizer, lr_scheduler, best_loss, accuracy_history, loss_history, save_path):
+    state = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'best_loss': best_loss,
+        'lr_scheduler': {
+            'best_loss': lr_scheduler.best_loss,
+            'epochs_since_improvement': lr_scheduler.epochs_since_improvement,
+            'lr_history': lr_scheduler.lr_history
+        },
+        'accuracy_history': accuracy_history,
+        'loss_history': loss_history
+    }
+    torch.save(state, save_path)
 
-def main(rank, world_size, batch_size, num_epochs, load_path=None):
+def load_training_state(load_path, model, optimizer, lr_scheduler):
+    state = torch.load(load_path)
+    model.load_state_dict(state['model_state_dict'])
+    optimizer.load_state_dict(state['optimizer_state_dict'])
+    lr_scheduler.best_loss = state['lr_scheduler']['best_loss']
+    lr_scheduler.epochs_since_improvement = state['lr_scheduler']['epochs_since_improvement']
+    lr_scheduler.lr_history = state['lr_scheduler']['lr_history']
+    return state['epoch'], state['best_loss'], state['accuracy_history'], state['loss_history']
+
+def main(rank, world_size, batch_size, num_epochs, save_path=None, load_path=None):
     setup(rank, world_size)
 
     dataset = load_dataset('imdb')
@@ -151,16 +174,19 @@ def main(rank, world_size, batch_size, num_epochs, load_path=None):
     model = SentimentClassifier(roberta_model).to(rank)
     model = DDP(model, device_ids=[rank])
 
-    if load_path:
-        load_classifier_head(model, load_path)
-
     optimizer = AdamW(model.module.classifier.parameters(), lr=1e-3)
     lr_scheduler = CustomLRScheduler(optimizer)
 
-    best_accuracy = 0.0
+    best_loss = float('inf')
+    start_epoch = 0
+    accuracy_history = []
+    loss_history = []
+
+    if load_path:
+        start_epoch, best_loss, accuracy_history, loss_history = load_training_state(load_path, model, optimizer, lr_scheduler)
 
     # train loop
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         model.train()
         total_loss = 0
         train_sampler.set_epoch(epoch)
@@ -182,8 +208,14 @@ def main(rank, world_size, batch_size, num_epochs, load_path=None):
             progress_bar.set_postfix(loss=avg_loss)
 
         avg_loss = total_loss / len(train_loader)
+        loss_history.append(avg_loss)
         if rank == 0:
             print(f'Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss}')
+
+        lr_scheduler.step(avg_loss)
+
+        if rank == 0:
+            save_training_state(epoch + 1, model, optimizer, lr_scheduler, best_loss, accuracy_history, loss_history, 'training_state.pt')
 
         # eval on test set
         model.eval()
@@ -201,14 +233,14 @@ def main(rank, world_size, batch_size, num_epochs, load_path=None):
                 correct += (predicted == labels).sum().item()
 
         accuracy = 100 * correct / total
+        accuracy_history.append(accuracy)
         if rank == 0:
             print(f'Test Accuracy: {accuracy:.2f}%')
-            if accuracy > best_accuracy:
-                best_accuracy = accuracy
+            print(f'Average Loss = {avg_loss}')
+            if avg_loss < best_loss:
+                best_loss = avg_loss
                 save_classifier_head(model, 'imdb_classifier_head.pt')
-                print(f'NEW BEST ACCURACY. MODEL SAVED.')
-
-        lr_scheduler.step(accuracy)
+                print(f'NEW BEST LOSS. MODEL SAVED.')
 
     cleanup()
 
@@ -217,12 +249,14 @@ if __name__ == '__main__':
     parser.add_argument('--world_size', type=int, default=2, help='number of gpus')
     parser.add_argument('--batch_size', type=int, default=4096, help='batch size per gpu')
     parser.add_argument('--num_epochs', type=int, default=3, help='number of epochs')
+    parser.add_argument('--save_path', type=str, default='training_state.pt', help='path to training state')
     parser.add_argument('--load_path', type=str, default=None, help='path to saved classifier head')
     args = parser.parse_args()
 
     world_size = args.world_size
     batch_size = args.batch_size
     num_epochs = args.num_epochs
+    save_path = args.save_path
     load_path = args.load_path
 
     torch.multiprocessing.spawn(main, args=(world_size, batch_size, num_epochs, load_path), nprocs=world_size, join=True)
