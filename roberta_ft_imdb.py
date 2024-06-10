@@ -47,7 +47,7 @@ class SentimentClassifier(nn.Module):
     def __init__(self, roberta_model):
         super(SentimentClassifier, self).__init__()
         self.roberta = roberta_model
-        self.dropout = nn.Dropout(p=0.0)
+        self.dropout = nn.Dropout(p=0.03)
         self.classifier = nn.Sequential(
                 # too large (try 512)
             nn.Linear(roberta_model.config.hidden_size, 512),
@@ -146,9 +146,9 @@ def load_training_state(load_path, model, optimizer, lr_scheduler):
     lr_scheduler.lr_history = state['lr_scheduler']['lr_history']
     return state['epoch'], state['best_loss'], state['accuracy_history'], state['loss_history']
 
-def main(rank, world_size, batch_size, num_epochs, save_path=None, load_path=None):
+def main(rank, world_size, batch_size, num_epochs, state_path=None, cHead_path=None):
     setup(rank, world_size)
-
+    print(state_path, cHead_path)
     dataset = load_dataset('imdb')
     tokenizer = RobertaTokenizer.from_pretrained('roberta-large')
 
@@ -174,7 +174,10 @@ def main(rank, world_size, batch_size, num_epochs, save_path=None, load_path=Non
     model = SentimentClassifier(roberta_model).to(rank)
     model = DDP(model, device_ids=[rank])
 
-    optimizer = AdamW(model.module.classifier.parameters(), lr=1e-3)
+    if cHead_path:
+        model.module.classifier.load_state_dict(torch.load(cHead_path))
+
+    optimizer = AdamW(model.module.classifier.parameters(), lr=1e-5)
     lr_scheduler = CustomLRScheduler(optimizer)
 
     best_loss = float('inf')
@@ -182,8 +185,10 @@ def main(rank, world_size, batch_size, num_epochs, save_path=None, load_path=Non
     accuracy_history = []
     loss_history = []
 
-    if load_path:
-        start_epoch, best_loss, accuracy_history, loss_history = load_training_state(load_path, model, optimizer, lr_scheduler)
+    if state_path:
+        print('state path given. Attempting to load...')
+        start_epoch, best_loss, accuracy_history, loss_history = load_training_state(state_path, model, optimizer, lr_scheduler)
+        print(f'{start_epoch} start epoch, {best_loss} best loss')
 
     # train loop
     for epoch in range(start_epoch, num_epochs):
@@ -211,8 +216,9 @@ def main(rank, world_size, batch_size, num_epochs, save_path=None, load_path=Non
         loss_history.append(avg_loss)
         if rank == 0:
             print(f'Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss}')
-
-        lr_scheduler.step(avg_loss)
+        
+        # constant lr this time
+        #lr_scheduler.step(avg_loss)
 
         if rank == 0:
             save_training_state(epoch + 1, model, optimizer, lr_scheduler, best_loss, accuracy_history, loss_history, 'training_state.pt')
@@ -249,15 +255,15 @@ if __name__ == '__main__':
     parser.add_argument('--world_size', type=int, default=2, help='number of gpus')
     parser.add_argument('--batch_size', type=int, default=4096, help='batch size per gpu')
     parser.add_argument('--num_epochs', type=int, default=3, help='number of epochs')
-    parser.add_argument('--save_path', type=str, default='training_state.pt', help='path to training state')
-    parser.add_argument('--load_path', type=str, default=None, help='path to saved classifier head')
+    parser.add_argument('--state_path', type=str, default=None, help='path to training state')
+    parser.add_argument('--cHead_path', type=str, default=None, help='path to saved classifier head')
     args = parser.parse_args()
 
     world_size = args.world_size
     batch_size = args.batch_size
     num_epochs = args.num_epochs
-    save_path = args.save_path
-    load_path = args.load_path
+    state_path = args.state_path
+    cHead_path = args.cHead_path
 
-    torch.multiprocessing.spawn(main, args=(world_size, batch_size, num_epochs, load_path), nprocs=world_size, join=True)
+    torch.multiprocessing.spawn(main, args=(world_size, batch_size, num_epochs, state_path, cHead_path), nprocs=world_size, join=True)
 
