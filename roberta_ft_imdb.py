@@ -12,7 +12,7 @@ import argparse
 
 
 class IMDbDataset(Dataset):
-    def __init__(self, dataset, tokenizer, max_length=256):
+    def __init__(self, dataset, tokenizer, max_length=512):
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -47,7 +47,7 @@ class SentimentClassifier(nn.Module):
     def __init__(self, roberta_model):
         super(SentimentClassifier, self).__init__()
         self.roberta = roberta_model
-        self.dropout = nn.Dropout(p=0.03)
+        self.dropout = nn.Dropout(p=0.01)
         self.classifier = nn.Sequential(
                 # too large (try 512)
             nn.Linear(roberta_model.config.hidden_size, 512),
@@ -220,32 +220,32 @@ def main(rank, world_size, batch_size, num_epochs, state_path=None, cHead_path=N
         # constant lr this time
         #lr_scheduler.step(avg_loss)
 
-        if rank == 0:
-            save_training_state(epoch + 1, model, optimizer, lr_scheduler, best_loss, accuracy_history, loss_history, 'training_state.pt')
-
         # eval on test set
-        model.eval()
-        correct = 0
-        total = 0
-        with torch.no_grad():
-            for batch in tqdm(test_loader, desc='Evaluating', position=rank):
-                input_ids = batch['input_ids'].to(rank)
-                attention_mask = batch['attention_mask'].to(rank)
-                labels = batch['labels'].to(rank)
+        if avg_loss < best_loss:
+            model.eval()
+            correct = 0
+            total = 0
+            with torch.no_grad():
+                for batch in tqdm(test_loader, desc='Evaluating', position=rank):
+                    input_ids = batch['input_ids'].to(rank)
+                    attention_mask = batch['attention_mask'].to(rank)
+                    labels = batch['labels'].to(rank)
 
-                outputs = model(input_ids, attention_mask=attention_mask)
-                _, predicted = torch.max(outputs, 1)
-                total += labels.size(0)
-                correct += (predicted == labels).sum().item()
+                    outputs = model(input_ids, attention_mask=attention_mask)
+                    _, predicted = torch.max(outputs, 1)
+                    total += labels.size(0)
+                    correct += (predicted == labels).sum().item()
 
-        accuracy = 100 * correct / total
-        accuracy_history.append(accuracy)
+            accuracy = 100 * correct / total
+            accuracy_history.append(accuracy)
+
         if rank == 0:
             print(f'Test Accuracy: {accuracy:.2f}%')
             print(f'Average Loss = {avg_loss}')
             if avg_loss < best_loss:
                 best_loss = avg_loss
                 save_classifier_head(model, 'imdb_classifier_head.pt')
+                save_training_state(epoch + 1, model, optimizer, lr_scheduler, best_loss, accuracy_history, loss_history, 'training_state.pt')
                 print(f'NEW BEST LOSS. MODEL SAVED.')
 
     cleanup()
